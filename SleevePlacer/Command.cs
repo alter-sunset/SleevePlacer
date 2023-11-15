@@ -1,16 +1,13 @@
-﻿using Autodesk.Revit.ApplicationServices;
-using Autodesk.Revit.DB.Structure;
+﻿using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Autodesk.Revit.Attributes;
-using Autodesk.Revit.UI.Events;
 using System.Windows.Forms;
 using Application = Autodesk.Revit.ApplicationServices.Application;
+using Autodesk.Revit.DB.Plumbing;
 
 namespace SleevePlacer
 {
@@ -22,6 +19,8 @@ namespace SleevePlacer
         {
             using (UIApplication uiApp = commandData.Application)
             {
+                DateTime start = DateTime.Now;
+
                 Application application = uiApp.Application;
                 Document mainDocument = uiApp.ActiveUIDocument.Document;
 
@@ -43,6 +42,9 @@ namespace SleevePlacer
                     .Where(d => d != null)
                     .ToList();
 
+                Dictionary<Wall, List<Element>> wallPipesDict = new Dictionary<Wall, List<Element>>();
+                Dictionary<Element, List<Wall>> pipeWallsDict = new Dictionary<Element, List<Wall>>();
+
                 double offset = 100;
 
                 foreach (Document linkedDocument in links)
@@ -52,144 +54,139 @@ namespace SleevePlacer
                         continue;
                     }
 
-                    PlaceTheSleeve(mainDocument, linkedDocument, wallIds, symbol, offset);
+                    IteratePipesAndWalls(mainDocument, linkedDocument, offset, symbol);
                 }
 
+                MessageBox.Show($"{DateTime.Now - start}");
                 return Result.Succeeded;
             }
         }
-
-        private void PlaceTheSleeve(Document mainDocument,
-            Document linkedDocument,
-            List<ElementId> wallIds,
-            FamilySymbol symbol,
-            double offset)
+        private void IteratePipesAndWalls(Document mainDocument, Document document, double offset, FamilySymbol symbol)
         {
-            foreach (ElementId wallId in wallIds)
+            using (FilteredElementCollector collector = new FilteredElementCollector(document))
             {
-                if (!(mainDocument.GetElement(wallId) is Wall wall))
+                FilteredElementCollector pipes = collector.OfClass(typeof(Pipe));
+
+                ReferenceIntersector referenceIntersector = new ReferenceIntersector(
+                    new ElementClassFilter(typeof(Wall)),
+                    FindReferenceTarget.Element,
+                    (View3D)mainDocument.ActiveView)
                 {
-                    continue;
-                }
-
-                GeometryElement geometry = wall.get_Geometry(new Options());
-
-                BoundingBoxIntersectsFilter bbFilter = GetOutlineFromWall(mainDocument, wall);
-
-                if (geometry is null)
-                {
-                    continue;
-                }
-
-                Curve wallCurve = (wall.Location as LocationCurve).Curve;
-
-                Solid solid = geometry
-                    .Select(e => e as GeometryObject)
-                    .Where(e => e != null)
-                    .Select(e => e as Solid)
-                    .FirstOrDefault(e => e != null);
-
-                if (solid == null || solid == default)
-                {
-                    continue;
-                }
-
-                ElementIntersectsSolidFilter filter = new ElementIntersectsSolidFilter(solid);
-
-                List<Element> pipes = new FilteredElementCollector(linkedDocument)
-                    .OfCategory(BuiltInCategory.OST_PipeCurves)
-                    .WhereElementIsNotElementType()
-                    .WherePasses(bbFilter)
-                    .WherePasses(filter)
-                    .Where(p => p != null)
-                    .ToList();
-
-                bbFilter.Dispose();
-                filter.Dispose();
+                    FindReferencesInRevitLinks = true
+                };
 
                 foreach (Element pipe in pipes)
                 {
-                    double diameter = pipe
-                        .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
-                        .AsDouble() + (offset / 304.8);
-
-                    Curve pipeCurve = (pipe.Location as LocationCurve).Curve;
+                    Curve pipeCurve = GetTheCurve(pipe);
 
                     if (pipeCurve == null
                         || !pipeCurve.IsBound
-                        || IsAxisZ(pipeCurve)
-                        || !IsPerpendicular(pipeCurve, wallCurve))
+                        || IsAxisZ(pipeCurve))
                     {
                         continue;
                     }
 
-                    //EXCEPTION MAFAKA
-                    //reversion of curve doesn't work
-                    //It seems that catching an exception causes all algo go to shit with a need for rerun
-                    SolidCurveIntersection intersection;
-                    try
+                    double diameter = pipe
+                        .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
+                        .AsDouble() + (offset / 304.8);
+                    Line pipeLine = pipeCurve as Line;
+
+                    XYZ origin = pipeLine.GetEndPoint(0);
+
+                    List<ReferenceWithContext> intersections = referenceIntersector
+                        .Find(origin, pipeLine.Direction)
+                        .Where(x => x.Proximity <= pipeLine.Length)
+                        .Distinct(new ReferenceWithContextElementEqualityComparer())
+                        .ToList();
+
+                    foreach (ReferenceWithContext intersection in intersections)
                     {
-                        intersection = solid.IntersectWithCurve(pipeCurve, null);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
+                        ElementId wallId = intersection.GetReference().ElementId;
+                        Wall wall = mainDocument.GetElement(wallId) as Wall;
+                        Curve wallCurve = GetTheCurve(wall);
+                        Solid solid = GetTheSolid(wall);
 
-                    //intersection = solid.IntersectWithCurve(pipeCurve, options);
+                        if (!IsPerpendicular(pipeCurve, wallCurve))
+                        {
+                            continue;
+                        }
 
-                    if (intersection == null
-                        || intersection == default
-                        || !intersection.IsValidObject
-                        || intersection.SegmentCount < 1)
-                    {
-                        continue;
-                    }
+                        SolidCurveIntersection wallPipeIntersection;
+                        wallPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
+                        //try
+                        //{
+                        //    wallPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
+                        //}
+                        //catch
+                        //{
+                        //    continue;
+                        //}
 
-                    Curve line = intersection.GetCurveSegment(0);
+                        if (wallPipeIntersection == null
+                            || wallPipeIntersection == default
+                            || !wallPipeIntersection.IsValidObject
+                            || wallPipeIntersection.SegmentCount < 1)
+                        {
+                            continue;
+                        }
 
-                    if (line == null)
-                    {
-                        continue;
-                    }
+                        Curve line = wallPipeIntersection.GetCurveSegment(0);
 
-                    XYZ startPoint = line.GetEndPoint(0);
-                    XYZ endPoint = line.GetEndPoint(1);
+                        if (line == null)
+                        {
+                            continue;
+                        }
 
-                    XYZ center = (startPoint + endPoint) / 2;
+                        XYZ startPoint = line.GetEndPoint(0);
+                        XYZ endPoint = line.GetEndPoint(1);
 
-                    using (Transaction transaction = new Transaction(mainDocument))
-                    {
-                        transaction.Start("Добавление гильзы");
+                        XYZ center = (startPoint + endPoint) / 2;
 
-                        FamilyInstance insertNew = mainDocument.Create
-                            .NewFamilyInstance(
-                            center,
-                            symbol,
-                            wall,
-                            mainDocument.GetElement(wall.LevelId) as Level,
-                            StructuralType.NonStructural);
+                        using (Transaction transaction = new Transaction(mainDocument))
+                        {
+                            transaction.Start("Добавление гильзы");
 
-                        insertNew.LookupParameter("Диаметр").Set(diameter);
-                        insertNew.LookupParameter("Id").Set(pipe.UniqueId);
+                            FamilyInstance insertNew = mainDocument.Create
+                                .NewFamilyInstance(
+                                center,
+                                symbol,
+                                wall,
+                                mainDocument.GetElement(wall.LevelId) as Level,
+                                StructuralType.NonStructural);
 
-                        transaction.Commit();
+                            insertNew.LookupParameter("Диаметр").Set(diameter);
+                            insertNew.LookupParameter("Id").Set(pipe.UniqueId);
+
+                            transaction.Commit();
+                        }
                     }
                 }
-
-                solid.Dispose();
             }
         }
 
-        private BoundingBoxIntersectsFilter GetOutlineFromWall(Document document, Wall wall)
+        private Solid GetTheSolid(Wall wall)
         {
-            BoundingBoxXYZ bb = wall.get_BoundingBox(document.ActiveView);
+            GeometryElement geometry = wall.get_Geometry(new Options());
 
-            Outline outline = new Outline(bb.Min, bb.Max);
+            if (geometry is null)
+            {
+                return null;
+            }
 
-            BoundingBoxIntersectsFilter bbFilter = new BoundingBoxIntersectsFilter(outline);
+            Solid solid = geometry
+                .Select(e => e as GeometryObject)
+                .Where(e => e != null)
+                .Select(e => e as Solid)
+                .FirstOrDefault(e => e != null);
 
-            return bbFilter;
+            return solid;
+        }
+
+        private Curve GetTheCurve(Element element)
+        {
+            Curve curve = (element.Location as LocationCurve).Curve;
+
+            return curve;
         }
 
         private bool IsPerpendicular(Curve curve1, Curve curve2)
@@ -221,6 +218,32 @@ namespace SleevePlacer
             else
             {
                 return false;
+            }
+        }
+    }
+
+    public class ReferenceWithContextElementEqualityComparer : IEqualityComparer<ReferenceWithContext>
+    {
+        public bool Equals(ReferenceWithContext x, ReferenceWithContext y)
+        {
+            if (ReferenceEquals(x, y)) return true;
+            if (x is null || y is null) return false;
+
+            Reference xReference = x.GetReference();
+
+            Reference yReference = y.GetReference();
+
+            return xReference.LinkedElementId == yReference.LinkedElementId
+                       && xReference.ElementId == yReference.ElementId;
+        }
+
+        public int GetHashCode(ReferenceWithContext obj)
+        {
+            Reference reference = obj.GetReference();
+
+            unchecked
+            {
+                return (reference.LinkedElementId.GetHashCode() * 397) ^ reference.ElementId.GetHashCode();
             }
         }
     }
