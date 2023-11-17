@@ -25,6 +25,7 @@ namespace SleevePlacer
                 UIDocument uiDocument = uiApp.ActiveUIDocument;
                 Document mainDocument = uiDocument.Document;
 
+                FamilySymbol symbol;
                 FamilySymbol symbolWall = FamSymbol(mainDocument, "00_Гильза_Стена");
                 FamilySymbol symbolFloor = FamSymbol(mainDocument, "00_Гильза_Плита");
 
@@ -40,69 +41,67 @@ namespace SleevePlacer
                     .Where(d => d != null)
                     .ToList();
 
+                ReferenceIntersector referenceIntersector;
                 ReferenceIntersector referenceIntersectorWalls = RefIntersector<Wall>(uiDocument);
                 ReferenceIntersector referenceIntersectorFloors = RefIntersector<Floor>(uiDocument);
 
                 double offset = 100;
 
-                foreach (Document linkedDocument in links)
+                using (Transaction transaction = new Transaction(mainDocument))
                 {
-                    if (linkedDocument == null)
-                    {
-                        continue;
-                    }
+                    transaction.Start("Добавление гильз");
 
-                    using (FilteredElementCollector collector = new FilteredElementCollector(linkedDocument))
+                    foreach (Document linkedDocument in links)
                     {
-                        IQueryable<Element> pipes = collector
-                            .OfClass(typeof(Pipe))
-                            .Where(d => d != null)
-                            .AsQueryable();
-
-                        foreach (Element pipe in pipes)
+                        if (linkedDocument == null)
                         {
-                            Curve pipeCurve = GetTheCurve(pipe);
+                            continue;
+                        }
 
-                            if (pipeCurve is null
-                                || !pipeCurve.IsBound)
-                            {
-                                continue;
-                            }
+                        using (FilteredElementCollector collector = new FilteredElementCollector(linkedDocument))
+                        {
+                            IQueryable<Element> pipes = collector
+                                .OfClass(typeof(Pipe))
+                                .Where(d => d != null)
+                                .AsQueryable();
 
-                            double diameter = pipe
-                                .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
-                                .AsDouble() + (offset / 304.8);
-                            Line pipeLine = pipeCurve as Line;
-                            XYZ origin = pipeLine.GetEndPoint(0);
+                            foreach (Element pipe in pipes)
+                            {
+                                Curve pipeCurve = GetTheCurve(pipe);
 
-                            if (IsVertical(pipeCurve))
-                            {
-                                IterateStructuralElements(mainDocument,
-                                    referenceIntersectorFloors,
-                                    pipe,
-                                    pipeCurve,
-                                    diameter,
-                                    origin,
-                                    pipeLine,
-                                    symbolFloor);
-                            }
-                            else if (IsHorizontal(pipeCurve))
-                            {
-                                IterateStructuralElements(mainDocument,
-                                    referenceIntersectorWalls,
-                                    pipe,
-                                    pipeCurve,
-                                    diameter,
-                                    origin,
-                                    pipeLine,
-                                    symbolWall);
-                            }
-                            else
-                            {
-                                continue;
+                                if (pipeCurve is null
+                                    || !pipeCurve.IsBound)
+                                {
+                                    continue;
+                                }
+
+                                double diameter = pipe
+                                    .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
+                                    .AsDouble() + (offset / 304.8);
+                                Line pipeLine = pipeCurve as Line;
+                                XYZ origin = pipeLine.GetEndPoint(0);
+
+                                if (IsVertical(pipeCurve))
+                                {
+                                    referenceIntersector = referenceIntersectorFloors;
+                                    symbol = symbolFloor;
+                                }
+                                else if (IsHorizontal(pipeCurve))
+                                {
+                                    referenceIntersector = referenceIntersectorWalls;
+                                    symbol = symbolWall;
+                                }
+                                else
+                                {
+                                    continue;
+                                }
+
+                                IterateStructuralElements(mainDocument, referenceIntersector, pipe, pipeCurve, diameter, origin, pipeLine, symbol);
                             }
                         }
                     }
+
+                    transaction.Commit();
                 }
 
                 MessageBox.Show($"{DateTime.Now - start}");
@@ -268,23 +267,16 @@ namespace SleevePlacer
 
                 XYZ center = (line.GetEndPoint(0) + line.GetEndPoint(1)) / 2;
 
-                using (Transaction transaction = new Transaction(mainDocument))
-                {
-                    transaction.Start("Добавление гильзы");
+                FamilyInstance insertNew = mainDocument.Create
+                    .NewFamilyInstance(
+                    center,
+                    symbol,
+                    element,
+                    mainDocument.GetElement(element.LevelId) as Level,
+                    StructuralType.NonStructural);
 
-                    FamilyInstance insertNew = mainDocument.Create
-                        .NewFamilyInstance(
-                        center,
-                        symbol,
-                        element,
-                        mainDocument.GetElement(element.LevelId) as Level,
-                        StructuralType.NonStructural);
-
-                    insertNew.LookupParameter("Диаметр").Set(diameter);
-                    insertNew.LookupParameter("Id").Set(pipe.UniqueId);
-
-                    transaction.Commit();
-                }
+                insertNew.LookupParameter("Диаметр").Set(diameter);
+                insertNew.LookupParameter("Id").Set(pipe.UniqueId);
             }
         }
     }
