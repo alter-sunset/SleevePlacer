@@ -22,18 +22,16 @@ namespace SleevePlacer
                 DateTime start = DateTime.Now;
 
                 Application application = uiApp.Application;
-                Document mainDocument = uiApp.ActiveUIDocument.Document;
+                UIDocument uiDocument = uiApp.ActiveUIDocument;
+                Document mainDocument = uiDocument.Document;
 
-                FamilySymbol symbol = new FilteredElementCollector(mainDocument)
-                    .OfClass(typeof(FamilySymbol))
-                    .Where(s => s != null)
-                    .FirstOrDefault(e => e.Name == "00_Гильза") as FamilySymbol;
+                FamilySymbol symbolWall = FamSymbol(mainDocument, "00_Гильза_Стена");
+                FamilySymbol symbolFloor = FamSymbol(mainDocument, "00_Гильза_Плита");
 
-                List<ElementId> wallIds = new FilteredElementCollector(mainDocument)
-                    .OfClass(typeof(Wall))
-                    .ToElementIds()
-                    .Where(w => w != null)
-                    .ToList();
+                if (symbolWall is null || symbolFloor is null)
+                {
+                    return Result.Failed;
+                }
 
                 List<Document> links = new FilteredElementCollector(mainDocument)
                     .OfClass(typeof(RevitLinkInstance))
@@ -42,8 +40,8 @@ namespace SleevePlacer
                     .Where(d => d != null)
                     .ToList();
 
-                Dictionary<Wall, List<Element>> wallPipesDict = new Dictionary<Wall, List<Element>>();
-                Dictionary<Element, List<Wall>> pipeWallsDict = new Dictionary<Element, List<Wall>>();
+                ReferenceIntersector referenceIntersectorWalls = RefIntersector<Wall>(uiDocument);
+                ReferenceIntersector referenceIntersectorFloors = RefIntersector<Floor>(uiDocument);
 
                 double offset = 100;
 
@@ -54,119 +52,90 @@ namespace SleevePlacer
                         continue;
                     }
 
-                    IteratePipesAndWalls(mainDocument, linkedDocument, offset, symbol);
+                    using (FilteredElementCollector collector = new FilteredElementCollector(linkedDocument))
+                    {
+                        IQueryable<Element> pipes = collector
+                            .OfClass(typeof(Pipe))
+                            .Where(d => d != null)
+                            .AsQueryable();
+
+                        foreach (Element pipe in pipes)
+                        {
+                            Curve pipeCurve = GetTheCurve(pipe);
+
+                            if (pipeCurve is null
+                                || !pipeCurve.IsBound)
+                            {
+                                continue;
+                            }
+
+                            double diameter = pipe
+                                .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
+                                .AsDouble() + (offset / 304.8);
+                            Line pipeLine = pipeCurve as Line;
+                            XYZ origin = pipeLine.GetEndPoint(0);
+
+                            if (IsVertical(pipeCurve))
+                            {
+                                IterateStructuralElements(mainDocument,
+                                    referenceIntersectorFloors,
+                                    pipe,
+                                    pipeCurve,
+                                    diameter,
+                                    origin,
+                                    pipeLine,
+                                    symbolFloor);
+                            }
+                            else if (IsHorizontal(pipeCurve))
+                            {
+                                IterateStructuralElements(mainDocument,
+                                    referenceIntersectorWalls,
+                                    pipe,
+                                    pipeCurve,
+                                    diameter,
+                                    origin,
+                                    pipeLine,
+                                    symbolWall);
+                            }
+                            else
+                            {
+                                continue;
+                            }
+                        }
+                    }
                 }
 
                 MessageBox.Show($"{DateTime.Now - start}");
                 return Result.Succeeded;
             }
         }
-        private void IteratePipesAndWalls(Document mainDocument, Document document, double offset, FamilySymbol symbol)
+
+        public ReferenceIntersector RefIntersector<T>(UIDocument uiDocument)
         {
-            using (FilteredElementCollector collector = new FilteredElementCollector(document))
+            ReferenceIntersector referenceIntersector = new ReferenceIntersector(
+                            new ElementClassFilter(typeof(T)),
+                            FindReferenceTarget.Element,
+                            (View3D)uiDocument.ActiveGraphicalView)
             {
-                FilteredElementCollector pipes = collector.OfClass(typeof(Pipe));
+                FindReferencesInRevitLinks = false
+            };
 
-                ReferenceIntersector referenceIntersector = new ReferenceIntersector(
-                    new ElementClassFilter(typeof(Wall)),
-                    FindReferenceTarget.Element,
-                    (View3D)mainDocument.ActiveView)
-                {
-                    FindReferencesInRevitLinks = true
-                };
-
-                foreach (Element pipe in pipes)
-                {
-                    Curve pipeCurve = GetTheCurve(pipe);
-
-                    if (pipeCurve == null
-                        || !pipeCurve.IsBound
-                        || IsAxisZ(pipeCurve))
-                    {
-                        continue;
-                    }
-
-                    double diameter = pipe
-                        .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
-                        .AsDouble() + (offset / 304.8);
-                    Line pipeLine = pipeCurve as Line;
-
-                    XYZ origin = pipeLine.GetEndPoint(0);
-
-                    List<ReferenceWithContext> intersections = referenceIntersector
-                        .Find(origin, pipeLine.Direction)
-                        .Where(x => x.Proximity <= pipeLine.Length)
-                        .Distinct(new ReferenceWithContextElementEqualityComparer())
-                        .ToList();
-
-                    foreach (ReferenceWithContext intersection in intersections)
-                    {
-                        ElementId wallId = intersection.GetReference().ElementId;
-                        Wall wall = mainDocument.GetElement(wallId) as Wall;
-                        Curve wallCurve = GetTheCurve(wall);
-                        Solid solid = GetTheSolid(wall);
-
-                        if (!IsPerpendicular(pipeCurve, wallCurve))
-                        {
-                            continue;
-                        }
-
-                        SolidCurveIntersection wallPipeIntersection;
-                        wallPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
-                        //try
-                        //{
-                        //    wallPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
-                        //}
-                        //catch
-                        //{
-                        //    continue;
-                        //}
-
-                        if (wallPipeIntersection == null
-                            || wallPipeIntersection == default
-                            || !wallPipeIntersection.IsValidObject
-                            || wallPipeIntersection.SegmentCount < 1)
-                        {
-                            continue;
-                        }
-
-                        Curve line = wallPipeIntersection.GetCurveSegment(0);
-
-                        if (line == null)
-                        {
-                            continue;
-                        }
-
-                        XYZ startPoint = line.GetEndPoint(0);
-                        XYZ endPoint = line.GetEndPoint(1);
-
-                        XYZ center = (startPoint + endPoint) / 2;
-
-                        using (Transaction transaction = new Transaction(mainDocument))
-                        {
-                            transaction.Start("Добавление гильзы");
-
-                            FamilyInstance insertNew = mainDocument.Create
-                                .NewFamilyInstance(
-                                center,
-                                symbol,
-                                wall,
-                                mainDocument.GetElement(wall.LevelId) as Level,
-                                StructuralType.NonStructural);
-
-                            insertNew.LookupParameter("Диаметр").Set(diameter);
-                            insertNew.LookupParameter("Id").Set(pipe.UniqueId);
-
-                            transaction.Commit();
-                        }
-                    }
-                }
-            }
+            return referenceIntersector;
         }
 
-        private Solid GetTheSolid(Wall wall)
+        public FamilySymbol FamSymbol(Document document, string name)
         {
-            GeometryElement geometry = wall.get_Geometry(new Options());
+            FamilySymbol symbol = new FilteredElementCollector(document)
+                    .OfClass(typeof(FamilySymbol))
+                    .Where(s => s != null)
+                    .FirstOrDefault(e => e.Name == name) as FamilySymbol;
+
+            return symbol;
+        }
+
+        private Solid GetTheSolid(Element element)
+        {
+            GeometryElement geometry = element.get_Geometry(new Options());
 
             if (geometry is null)
             {
@@ -184,8 +153,16 @@ namespace SleevePlacer
 
         private Curve GetTheCurve(Element element)
         {
-            Curve curve = (element.Location as LocationCurve).Curve;
+            Curve curve;
 
+            try
+            {
+                curve = (element.Location as LocationCurve).Curve;
+            }
+            catch
+            {
+                return null;
+            }
             return curve;
         }
 
@@ -206,18 +183,108 @@ namespace SleevePlacer
             }
         }
 
-        private bool IsAxisZ(Curve curve)
+        private bool IsHorizontal(Curve curve)
         {
             double startZ = curve.GetEndPoint(0).Z;
             double endZ = curve.GetEndPoint(1).Z;
 
             if (Math.Round(startZ - endZ) != 0)
             {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+
+        private bool IsVertical(Curve curve)
+        {
+            XYZ start = curve.GetEndPoint(0);
+            XYZ end = curve.GetEndPoint(1);
+
+            double startX = start.X;
+            double endX = end.X;
+            double startY = start.Y;
+            double endY = end.Y;
+            double startZ = start.Z;
+            double endZ = end.Z;
+
+            if (Math.Round(startX - endX) == 0
+                && Math.Round(startY - endY) == 0
+                && Math.Round(startZ - endZ) != 0)
+            {
                 return true;
             }
             else
             {
                 return false;
+            }
+        }
+
+        private void IterateStructuralElements(Document mainDocument,
+            ReferenceIntersector referenceIntersector,
+            Element pipe,
+            Curve pipeCurve,
+            double diameter,
+            XYZ origin,
+            Line pipeLine,
+            FamilySymbol symbol)
+        {
+            IEnumerable<ReferenceWithContext> intersections = referenceIntersector
+                       .Find(origin, pipeLine.Direction)
+                       .Where(x => x.Proximity <= pipeLine.Length)
+                       .Distinct(new ReferenceWithContextElementEqualityComparer());
+
+            foreach (ReferenceWithContext intersection in intersections)
+            {
+                ElementId elementId = intersection.GetReference().ElementId;
+                Element element = mainDocument.GetElement(elementId);
+                Solid solid = GetTheSolid(element);
+                Curve elementCurve = GetTheCurve(element);
+
+                if (elementCurve != null
+                    && !IsPerpendicular(pipeCurve, elementCurve))
+                {
+                    continue;
+                }
+
+                SolidCurveIntersection elementPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
+
+                if (elementPipeIntersection == null
+                    || elementPipeIntersection == default
+                    || !elementPipeIntersection.IsValidObject
+                    || elementPipeIntersection.SegmentCount < 1)
+                {
+                    continue;
+                }
+
+                Curve line = elementPipeIntersection.GetCurveSegment(0);
+
+                if (line == null)
+                {
+                    continue;
+                }
+
+                XYZ center = (line.GetEndPoint(0) + line.GetEndPoint(1)) / 2;
+
+                using (Transaction transaction = new Transaction(mainDocument))
+                {
+                    transaction.Start("Добавление гильзы");
+
+                    FamilyInstance insertNew = mainDocument.Create
+                        .NewFamilyInstance(
+                        center,
+                        symbol,
+                        element,
+                        mainDocument.GetElement(element.LevelId) as Level,
+                        StructuralType.NonStructural);
+
+                    insertNew.LookupParameter("Диаметр").Set(diameter);
+                    insertNew.LookupParameter("Id").Set(pipe.UniqueId);
+
+                    transaction.Commit();
+                }
             }
         }
     }
