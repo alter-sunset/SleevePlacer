@@ -54,6 +54,9 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="ReferenceWithContextElementEqualityComparer.cs" />
+    <Compile Include="Utils.cs" />
+    <Compile Include="XYZParser.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

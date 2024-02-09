@@ -26,11 +26,12 @@ namespace SleevePlacer
                 Document mainDocument = uiDocument.Document;
 
                 FamilySymbol symbol;
-                FamilySymbol symbolWall = FamSymbol(mainDocument, "00_Гильза_Стена");
-                FamilySymbol symbolFloor = FamSymbol(mainDocument, "00_Гильза_Плита");
+                FamilySymbol symbolWall = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Стена");
+                FamilySymbol symbolFloor = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Плита");
 
                 if (symbolWall is null || symbolFloor is null)
                 {
+                    MessageBox.Show("Требуемые семейства гильз не обнаружены");
                     return Result.Failed;
                 }
 
@@ -42,14 +43,17 @@ namespace SleevePlacer
                     .ToList();
 
                 ReferenceIntersector referenceIntersector;
-                ReferenceIntersector referenceIntersectorWalls = RefIntersector<Wall>(uiDocument);
-                ReferenceIntersector referenceIntersectorFloors = RefIntersector<Floor>(uiDocument);
+                ReferenceIntersector referenceIntersectorWalls = Utils.ReferenceIntersector<Wall>(uiDocument);
+                ReferenceIntersector referenceIntersectorFloors = Utils.ReferenceIntersector<Floor>(uiDocument);
 
                 double offset = 100;
 
                 using (Transaction transaction = new Transaction(mainDocument))
                 {
                     transaction.Start("Добавление гильз");
+
+                    symbolWall.Activate();
+                    symbolFloor.Activate();
 
                     foreach (Document linkedDocument in links)
                     {
@@ -67,26 +71,23 @@ namespace SleevePlacer
 
                             foreach (Element pipe in pipes)
                             {
-                                Curve pipeCurve = GetTheCurve(pipe);
-
+                                Curve pipeCurve = Utils.GetTheCurve(pipe);
                                 if (pipeCurve is null
                                     || !pipeCurve.IsBound)
                                 {
                                     continue;
                                 }
 
-                                double diameter = pipe
-                                    .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
-                                    .AsDouble() + (offset / 304.8);
-                                Line pipeLine = pipeCurve as Line;
-                                XYZ origin = pipeLine.GetEndPoint(0);
+                                //engineering department said that this method would only create problems
+                                //so no need for this
+                                //CheckExistingSleeves(mainDocument, pipe, pipeCurve);
 
-                                if (IsVertical(pipeCurve))
+                                if (Utils.IsCurveVertical(pipeCurve))
                                 {
                                     referenceIntersector = referenceIntersectorFloors;
                                     symbol = symbolFloor;
                                 }
-                                else if (IsHorizontal(pipeCurve))
+                                else if (Utils.IsCurveHorizontal(pipeCurve))
                                 {
                                     referenceIntersector = referenceIntersectorWalls;
                                     symbol = symbolWall;
@@ -96,7 +97,18 @@ namespace SleevePlacer
                                     continue;
                                 }
 
-                                IterateStructuralElements(mainDocument, referenceIntersector, pipe, pipeCurve, diameter, origin, pipeLine, symbol);
+                                try
+                                {
+                                    IterateStructuralElements(mainDocument, referenceIntersector, pipe, pipeCurve, offset, symbol);
+                                }
+                                catch (Exception e)
+                                {
+                                    if (e is NullReferenceException)
+                                    {
+                                        MessageBox.Show("Проверьте параметры семейств.");
+                                        return Result.Failed;
+                                    }
+                                }
                             }
                         }
                     }
@@ -109,147 +121,43 @@ namespace SleevePlacer
             }
         }
 
-        public ReferenceIntersector RefIntersector<T>(UIDocument uiDocument)
-        {
-            ReferenceIntersector referenceIntersector = new ReferenceIntersector(
-                            new ElementClassFilter(typeof(T)),
-                            FindReferenceTarget.Element,
-                            (View3D)uiDocument.ActiveGraphicalView)
-            {
-                FindReferencesInRevitLinks = false
-            };
-
-            return referenceIntersector;
-        }
-
-        public FamilySymbol FamSymbol(Document document, string name)
-        {
-            FamilySymbol symbol = new FilteredElementCollector(document)
-                    .OfClass(typeof(FamilySymbol))
-                    .Where(s => s != null)
-                    .FirstOrDefault(e => e.Name == name) as FamilySymbol;
-
-            return symbol;
-        }
-
-        private Solid GetTheSolid(Element element)
-        {
-            GeometryElement geometry = element.get_Geometry(new Options());
-
-            if (geometry is null)
-            {
-                return null;
-            }
-
-            Solid solid = geometry
-                .Select(e => e as GeometryObject)
-                .Where(e => e != null)
-                .Select(e => e as Solid)
-                .FirstOrDefault(e => e != null);
-
-            return solid;
-        }
-
-        private Curve GetTheCurve(Element element)
-        {
-            Curve curve;
-
-            try
-            {
-                curve = (element.Location as LocationCurve).Curve;
-            }
-            catch
-            {
-                return null;
-            }
-            return curve;
-        }
-
-        private bool IsPerpendicular(Curve curve1, Curve curve2)
-        {
-            XYZ direction1 = (curve1 as Line).Direction;
-            XYZ direction2 = (curve2 as Line).Direction;
-
-            double angle = direction1.AngleTo(direction2);
-
-            if (Math.Round(angle, 4) == Math.Round(Math.PI / 2, 4))
-            {
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        private bool IsHorizontal(Curve curve)
-        {
-            double startZ = curve.GetEndPoint(0).Z;
-            double endZ = curve.GetEndPoint(1).Z;
-
-            if (Math.Round(startZ - endZ) != 0)
-            {
-                return false;
-            }
-            else
-            {
-                return true;
-            }
-        }
-
-        private bool IsVertical(Curve curve)
-        {
-            XYZ start = curve.GetEndPoint(0);
-            XYZ end = curve.GetEndPoint(1);
-
-            double startX = start.X;
-            double endX = end.X;
-            double startY = start.Y;
-            double endY = end.Y;
-            double startZ = start.Z;
-            double endZ = end.Z;
-
-            if (Math.Round(startX - endX) == 0
-                && Math.Round(startY - endY) == 0
-                && Math.Round(startZ - endZ) != 0)
-            {
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
         private void IterateStructuralElements(Document mainDocument,
             ReferenceIntersector referenceIntersector,
             Element pipe,
             Curve pipeCurve,
-            double diameter,
-            XYZ origin,
-            Line pipeLine,
+            double offset,
             FamilySymbol symbol)
         {
-            IEnumerable<ReferenceWithContext> intersections = referenceIntersector
-                       .Find(origin, pipeLine.Direction)
-                       .Where(x => x.Proximity <= pipeLine.Length)
-                       .Distinct(new ReferenceWithContextElementEqualityComparer());
+            double diameter = pipe
+                .get_Parameter(BuiltInParameter.RBS_PIPE_OUTER_DIAMETER)
+                .AsDouble() + (offset / 304.8);
+            Line pipeLine = pipeCurve as Line;
+            XYZ origin = pipeLine.GetEndPoint(0);
 
-            foreach (ReferenceWithContext intersection in intersections)
+            IEnumerable<Element> elements = referenceIntersector
+                .Find(origin, pipeLine.Direction)
+                .Where(x => x.Proximity <= pipeLine.Length)
+                .Distinct(new ReferenceWithContextElementEqualityComparer())
+                .Where(r => r != null)
+                .Select(r => r.GetReference().ElementId)
+                .Select(e => mainDocument.GetElement(e));
+
+            foreach (Element element in elements)
             {
-                ElementId elementId = intersection.GetReference().ElementId;
-                Element element = mainDocument.GetElement(elementId);
-                Solid solid = GetTheSolid(element);
-                Curve elementCurve = GetTheCurve(element);
+                Solid solid = Utils.GetTheSolid(element);
+                if (solid is null)
+                {
+                    continue;
+                }
 
+                Curve elementCurve = Utils.GetTheCurve(element);
                 if (elementCurve != null
-                    && !IsPerpendicular(pipeCurve, elementCurve))
+                    && !(Utils.IsCurvePerpendicular(pipeCurve, elementCurve)))
                 {
                     continue;
                 }
 
                 SolidCurveIntersection elementPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
-
                 if (elementPipeIntersection == null
                     || elementPipeIntersection == default
                     || !elementPipeIntersection.IsValidObject
@@ -259,7 +167,6 @@ namespace SleevePlacer
                 }
 
                 Curve line = elementPipeIntersection.GetCurveSegment(0);
-
                 if (line == null)
                 {
                     continue;
@@ -269,41 +176,44 @@ namespace SleevePlacer
 
                 FamilyInstance insertNew = mainDocument.Create
                     .NewFamilyInstance(
-                    center,
-                    symbol,
-                    element,
-                    mainDocument.GetElement(element.LevelId) as Level,
-                    StructuralType.NonStructural);
+                        center,
+                        symbol,
+                        element,
+                        mainDocument.GetElement(element.LevelId) as Level,
+                        StructuralType.NonStructural);
 
                 insertNew.LookupParameter("Диаметр").Set(diameter);
                 insertNew.LookupParameter("Id").Set(pipe.UniqueId);
+                insertNew.LookupParameter("XYZ").Set(XYZParser.Insert(center));
             }
         }
-    }
 
-    public class ReferenceWithContextElementEqualityComparer : IEqualityComparer<ReferenceWithContext>
-    {
-        public bool Equals(ReferenceWithContext x, ReferenceWithContext y)
+        private void CheckExistingSleeves(Document mainDocument, Element pipe, Curve pipeCurve)
         {
-            if (ReferenceEquals(x, y)) return true;
-            if (x is null || y is null) return false;
+            List<FamilyInstance> sleeves = new FilteredElementCollector(mainDocument)
+                                    .OfClass(typeof(FamilyInstance))
+                                    .Where(i => i.Name.StartsWith("00_Гильза_"))
+                                    .Where(i => i.LookupParameter("Id").AsString() == pipe.UniqueId)
+                                    .Select(i => i as FamilyInstance)
+                                    .Where(i => Math.Abs(
+                                        pipeCurve.Distance(
+                                            XYZParser.Extract(i))) > 1e-6)
+                                    .Where(d => d != null)
+                                    .ToList();
 
-            Reference xReference = x.GetReference();
-
-            Reference yReference = y.GetReference();
-
-            return xReference.LinkedElementId == yReference.LinkedElementId
-                       && xReference.ElementId == yReference.ElementId;
-        }
-
-        public int GetHashCode(ReferenceWithContext obj)
-        {
-            Reference reference = obj.GetReference();
-
-            unchecked
+            foreach (FamilyInstance sleeve in sleeves)
             {
-                return (reference.LinkedElementId.GetHashCode() * 397) ^ reference.ElementId.GetHashCode();
+                //not an optimal solution if we do everything in one operation
+                //cuz new instances won't be created
+                mainDocument.Delete(sleeve.Id);
             }
+
+            // get pipes collection
+            // iterate collection
+            // find all family instances that relate to this pipe
+            // check if an instance is centered
+            // if not, move it to designated position
+            // update coordinates
         }
     }
 }
