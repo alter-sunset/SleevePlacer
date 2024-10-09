@@ -1,13 +1,11 @@
-﻿using Autodesk.Revit.DB.Structure;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.Linq;
-using Autodesk.Revit.Attributes;
-using System.Windows.Forms;
-using Application = Autodesk.Revit.ApplicationServices.Application;
+using System.Collections.Generic;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.DB.Plumbing;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.Attributes;
 
 namespace SleevePlacer
 {
@@ -17,111 +15,90 @@ namespace SleevePlacer
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            using (UIApplication uiApp = commandData.Application)
+            using UIApplication uiApp = commandData.Application;
+            DateTime start = DateTime.Now;
+            UIDocument uiDocument = uiApp.ActiveUIDocument;
+            Document mainDocument = uiDocument.Document;
+
+            FamilySymbol symbol;
+            FamilySymbol symbolWall = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Стена");
+            FamilySymbol symbolFloor = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Плита");
+
+            if (symbolWall is null || symbolFloor is null)
             {
-                DateTime start = DateTime.Now;
+                TaskDialog.Show("Нет семейств", "Требуемые семейства гильз не обнаружены");
+                return Result.Failed;
+            }
 
-                Application application = uiApp.Application;
-                UIDocument uiDocument = uiApp.ActiveUIDocument;
-                Document mainDocument = uiDocument.Document;
+            List<Document> links = new FilteredElementCollector(mainDocument)
+                .OfClass(typeof(RevitLinkInstance))
+                .Cast<RevitLinkInstance>()
+                .Select(l => l.GetLinkDocument())
+                .Where(d => d != null)
+                .ToList();
 
-                FamilySymbol symbol;
-                FamilySymbol symbolWall = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Стена");
-                FamilySymbol symbolFloor = Utils.GetFamilySymbol(mainDocument, "00_Гильза_Плита");
+            ReferenceIntersector referenceIntersector;
+            ReferenceIntersector referenceIntersectorWalls = Utils.ReferenceIntersector<Wall>(uiDocument);
+            ReferenceIntersector referenceIntersectorFloors = Utils.ReferenceIntersector<Floor>(uiDocument);
 
-                if (symbolWall is null || symbolFloor is null)
-                {
-                    MessageBox.Show("Требуемые семейства гильз не обнаружены");
-                    return Result.Failed;
-                }
+            using Transaction transaction = new(mainDocument);
+            transaction.Start("Добавление гильз");
+            symbolWall.Activate();
+            symbolFloor.Activate();
 
-                List<Document> links = new FilteredElementCollector(mainDocument)
-                    .OfClass(typeof(RevitLinkInstance))
-                    .Select(l => l as RevitLinkInstance)
-                    .Select(l => l.GetLinkDocument())
+            foreach (Document linkedDocument in links)
+            {
+                if (linkedDocument is null)
+                    continue;
+
+                using FilteredElementCollector collector = new(linkedDocument);
+                IQueryable<Element> pipes = collector
+                    .OfClass(typeof(Pipe))
                     .Where(d => d != null)
-                    .ToList();
+                    .AsQueryable();
 
-                ReferenceIntersector referenceIntersector;
-                ReferenceIntersector referenceIntersectorWalls = Utils.ReferenceIntersector<Wall>(uiDocument);
-                ReferenceIntersector referenceIntersectorFloors = Utils.ReferenceIntersector<Floor>(uiDocument);
-
-                double offset = 100;
-
-                using (Transaction transaction = new Transaction(mainDocument))
+                foreach (Element pipe in pipes)
                 {
-                    transaction.Start("Добавление гильз");
+                    Curve pipeCurve = Utils.GetTheCurve(pipe);
+                    if (pipeCurve is null || !pipeCurve.IsBound)
+                        continue;
 
-                    symbolWall.Activate();
-                    symbolFloor.Activate();
-
-                    foreach (Document linkedDocument in links)
+                    if (Utils.IsCurveVertical(pipeCurve))
                     {
-                        if (linkedDocument == null)
-                        {
-                            continue;
-                        }
-
-                        using (FilteredElementCollector collector = new FilteredElementCollector(linkedDocument))
-                        {
-                            IQueryable<Element> pipes = collector
-                                .OfClass(typeof(Pipe))
-                                .Where(d => d != null)
-                                .AsQueryable();
-
-                            foreach (Element pipe in pipes)
-                            {
-                                Curve pipeCurve = Utils.GetTheCurve(pipe);
-                                if (pipeCurve is null
-                                    || !pipeCurve.IsBound)
-                                {
-                                    continue;
-                                }
-
-                                //engineering department said that this method would only create problems
-                                //so no need for this
-                                //CheckExistingSleeves(mainDocument, pipe, pipeCurve);
-
-                                if (Utils.IsCurveVertical(pipeCurve))
-                                {
-                                    referenceIntersector = referenceIntersectorFloors;
-                                    symbol = symbolFloor;
-                                }
-                                else if (Utils.IsCurveHorizontal(pipeCurve))
-                                {
-                                    referenceIntersector = referenceIntersectorWalls;
-                                    symbol = symbolWall;
-                                }
-                                else
-                                {
-                                    continue;
-                                }
-
-                                try
-                                {
-                                    IterateStructuralElements(mainDocument, referenceIntersector, pipe, pipeCurve, offset, symbol);
-                                }
-                                catch (Exception e)
-                                {
-                                    if (e is NullReferenceException)
-                                    {
-                                        MessageBox.Show("Проверьте параметры семейств.");
-                                        return Result.Failed;
-                                    }
-                                }
-                            }
-                        }
+                        referenceIntersector = referenceIntersectorFloors;
+                        symbol = symbolFloor;
+                    }
+                    else if (Utils.IsCurveHorizontal(pipeCurve))
+                    {
+                        referenceIntersector = referenceIntersectorWalls;
+                        symbol = symbolWall;
+                    }
+                    else
+                    {
+                        continue;
                     }
 
-                    transaction.Commit();
+                    try
+                    {
+                        IterateStructuralElements(mainDocument, referenceIntersector, pipe, pipeCurve, 100, symbol);
+                    }
+                    catch (Exception e)
+                    {
+                        if (e is NullReferenceException)
+                        {
+                            TaskDialog.Show("Ошибка", "Проверьте параметры семейств.");
+                            return Result.Failed;
+                        }
+                    }
                 }
-
-                MessageBox.Show($"{DateTime.Now - start}");
-                return Result.Succeeded;
             }
+            transaction.Commit();
+
+            TaskDialog.Show("Готово!", $"{DateTime.Now - start}");
+            return Result.Succeeded;
         }
 
-        private void IterateStructuralElements(Document mainDocument,
+        private static void IterateStructuralElements(Document mainDocument,
             ReferenceIntersector referenceIntersector,
             Element pipe,
             Curve pipeCurve,
@@ -137,40 +114,31 @@ namespace SleevePlacer
             IEnumerable<Element> elements = referenceIntersector
                 .Find(origin, pipeLine.Direction)
                 .Where(x => x.Proximity <= pipeLine.Length)
-                .Distinct(new ReferenceWithContextElementEqualityComparer())
-                .Where(r => r != null)
+                .Distinct(new ReferenceWithContextComparer())
+                .Where(r => r is not null)
                 .Select(r => r.GetReference().ElementId)
-                .Select(e => mainDocument.GetElement(e));
+                .Select(mainDocument.GetElement);
 
             foreach (Element element in elements)
             {
                 Solid solid = Utils.GetTheSolid(element);
                 if (solid is null)
-                {
                     continue;
-                }
 
                 Curve elementCurve = Utils.GetTheCurve(element);
-                if (elementCurve != null
-                    && !(Utils.IsCurvePerpendicular(pipeCurve, elementCurve)))
-                {
+                if (elementCurve is not null && !Utils.IsCurvePerpendicular(pipeCurve, elementCurve))
                     continue;
-                }
 
                 SolidCurveIntersection elementPipeIntersection = solid.IntersectWithCurve(pipeCurve, null);
                 if (elementPipeIntersection == null
                     || elementPipeIntersection == default
                     || !elementPipeIntersection.IsValidObject
                     || elementPipeIntersection.SegmentCount < 1)
-                {
                     continue;
-                }
 
                 Curve line = elementPipeIntersection.GetCurveSegment(0);
-                if (line == null)
-                {
+                if (line is null)
                     continue;
-                }
 
                 XYZ center = (line.GetEndPoint(0) + line.GetEndPoint(1)) / 2;
 
@@ -186,34 +154,6 @@ namespace SleevePlacer
                 insertNew.LookupParameter("Id").Set(pipe.UniqueId);
                 insertNew.LookupParameter("XYZ").Set(XYZParser.Insert(center));
             }
-        }
-
-        private void CheckExistingSleeves(Document mainDocument, Element pipe, Curve pipeCurve)
-        {
-            List<FamilyInstance> sleeves = new FilteredElementCollector(mainDocument)
-                                    .OfClass(typeof(FamilyInstance))
-                                    .Where(i => i.Name.StartsWith("00_Гильза_"))
-                                    .Where(i => i.LookupParameter("Id").AsString() == pipe.UniqueId)
-                                    .Select(i => i as FamilyInstance)
-                                    .Where(i => Math.Abs(
-                                        pipeCurve.Distance(
-                                            XYZParser.Extract(i))) > 1e-6)
-                                    .Where(d => d != null)
-                                    .ToList();
-
-            foreach (FamilyInstance sleeve in sleeves)
-            {
-                //not an optimal solution if we do everything in one operation
-                //cuz new instances won't be created
-                mainDocument.Delete(sleeve.Id);
-            }
-
-            // get pipes collection
-            // iterate collection
-            // find all family instances that relate to this pipe
-            // check if an instance is centered
-            // if not, move it to designated position
-            // update coordinates
         }
     }
 }
