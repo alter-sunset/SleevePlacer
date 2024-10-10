@@ -55,15 +55,26 @@ namespace SleevePlacer
         {
             double startZ = curve.GetEndPoint(0).Z;
             double endZ = curve.GetEndPoint(1).Z;
-            return Math.Round(startZ - endZ) == 0;
+            return Math.Abs(startZ - endZ) < 1e-6;
         }
         public static bool IsCurveVertical(Curve curve)
         {
             XYZ start = curve.GetEndPoint(0);
             XYZ end = curve.GetEndPoint(1);
-            return Math.Round(start.X - end.X) == 0
-                && Math.Round(start.Y - end.Y) == 0
-                && Math.Round(start.Z - end.Z) != 0;
+            return Math.Abs(start.X - end.X) < 1e-6 &&
+                   Math.Abs(start.Y - end.Y) < 1e-6 &&
+                   Math.Abs(start.Z - end.Z) >= 1e-6;
+        }
+        public static (ReferenceIntersector referenceIntersector, FamilySymbol symbol) GetReferenceIntersectorAndSymbol(
+            this Curve curve, UIDocument uiDocument, FamilySymbol symbolWall, FamilySymbol symbolFloor)
+        {
+            if (IsCurveVertical(curve))
+                return (ReferenceIntersector<Floor>(uiDocument), symbolFloor);
+
+            else if (IsCurveHorizontal(curve))
+                return (ReferenceIntersector<Wall>(uiDocument), symbolWall);
+
+            return (null, null);
         }
     }
 }
