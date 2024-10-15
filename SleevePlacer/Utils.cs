@@ -23,8 +23,7 @@ namespace SleevePlacer
         public static Solid GetTheSolid(Element element)
         {
             GeometryElement geometry = element.get_Geometry(new Options());
-            if (geometry is null)
-                return null;
+            if (geometry is null) return null;
 
             return geometry.Cast<GeometryObject>()
                 .Where(e => e != null)

@@ -7,8 +7,8 @@ namespace SleevePlacer
     {
         public bool Equals(ReferenceWithContext x, ReferenceWithContext y)
         {
-            if (ReferenceEquals(x, y)) return true;
             if (x is null || y is null) return false;
+            if (ReferenceEquals(x, y)) return true;
 
             Reference xReference = x.GetReference();
             Reference yReference = y.GetReference();

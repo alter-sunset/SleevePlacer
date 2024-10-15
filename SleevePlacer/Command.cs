@@ -33,21 +33,20 @@ namespace SleevePlacer
                 .OfClass(typeof(RevitLinkInstance))
                 .Cast<RevitLinkInstance>()
                 .Select(l => l.GetLinkDocument())
-                .Where(d => d != null)
+                .Where(d => d is not null)
                 .ToList();
 
             using Transaction transaction = new(mainDocument);
             transaction.Start("Добавление гильз");
-            symbolWall.Activate();
-            symbolFloor.Activate();
+            symbolWall?.Activate();
+            symbolFloor?.Activate();
 
             foreach (Document linkedDocument in links)
             {
-                if (linkedDocument is null) continue;
-
                 IEnumerable<Pipe> pipes = new FilteredElementCollector(linkedDocument)
                     .OfClass(typeof(Pipe))
-                    .Cast<Pipe>();
+                    .Cast<Pipe>()
+                    .Where(p => p is not null);
 
                 foreach (Pipe pipe in pipes)
                 {
