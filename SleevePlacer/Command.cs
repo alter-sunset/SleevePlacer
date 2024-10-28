@@ -29,12 +29,12 @@ namespace SleevePlacer
                 return Result.Failed;
             }
 
-            List<Document> links = new FilteredElementCollector(mainDocument)
+            Document[] links = new FilteredElementCollector(mainDocument)
                 .OfClass(typeof(RevitLinkInstance))
                 .Cast<RevitLinkInstance>()
                 .Select(l => l.GetLinkDocument())
                 .Where(d => d is not null)
-                .ToList();
+                .ToArray();
 
             using Transaction transaction = new(mainDocument);
             transaction.Start("Добавление гильз");
@@ -53,8 +53,7 @@ namespace SleevePlacer
                     Curve pipeCurve = Utils.GetTheCurve(pipe);
                     if (pipeCurve is null || !pipeCurve.IsBound) continue;
 
-                    (ReferenceIntersector referenceIntersector, FamilySymbol symbol) = pipeCurve
-                        .GetReferenceIntersectorAndSymbol(uiDocument, symbolWall, symbolFloor);
+                    (ReferenceIntersector referenceIntersector, FamilySymbol symbol) = pipeCurve.GetReferenceIntersectorAndSymbol(uiDocument, symbolWall, symbolFloor);
 
                     if (referenceIntersector == null || symbol == null) continue;
 
